@@ -1,39 +1,67 @@
-# 将微信读书划线和笔记同步到Notion
+# 将微信读书划线和笔记同步到 Notion
 
+本项目通过 GitHub Actions 定时同步微信读书书架、划线与笔记到 Notion。
 
-本项目通过Github Action每天定时同步微信读书划线到Notion。
+预览效果：[malinkang Notion 示例](https://malinkang.notion.site/9a311b7413b74c8788752249edd0b256?pvs=25)
 
-预览效果：[https://malinkang.notion.site/malinkang/534a7684b30e4a879269313f437f2185](https://malinkang.notion.site/9a311b7413b74c8788752249edd0b256?pvs=25)
+## 认证方式（WeRead Skills API）
 
+自 `feature/weread-skills-api` 分支起，使用微信读书官方 **Agent API Gateway**（WeRead Skills），不再依赖 Cookie / CookieCloud。
 
-## 使用
+1. 在微信读书 App 中获取 API Key（格式：`wrk-xxxxxxxx`）。
+2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 中新增：
+   - `WEREAD_API_KEY`：微信读书 API Key
+   - `NOTION_TOKEN`、`NOTION_PAGE`：与原先相同
+3. （可选）阅读时长热力图相关：`HEATMAP_BLOCK_ID`、`NAME`，以及 `vars` 中的颜色配置。
 
-> [!IMPORTANT]  
-> 关注公众号获取教程，后续有更新也会第一时间在公众号里同步。
+Skills 文档与接口说明见：[weread-skills.zip](https://cdn.weread.qq.com/skills/weread-skills.zip)
 
-![扫码_搜索联合传播样式-标准色版](https://github.com/malinkang/weread2notion/assets/3365208/191900c6-958e-4f9b-908d-a40a54889b5e)
+## GitHub Actions
 
+| Workflow | 说明 | 默认调度 |
+|----------|------|----------|
+| `weread.yml` | 书架元数据 + 划线/笔记同步 | 每天 00:00 UTC |
+| `read_time.yml` | 阅读时长同步 + 热力图 | 每 3 小时 |
 
-## 群
-> [!IMPORTANT]  
-> 欢迎加入群讨论。可以讨论使用中遇到的任何问题，也可以讨论Notion使用，后续我也会在群中分享更多Notion自动化工具。微信群失效的话可以添加我的微信malinkang，我拉你入群。
+也可在 Actions 页手动 **Run workflow**。
 
-| 微信群 | QQ群 |
-| --- | --- |
-| <div align="center"><img src="https://github.com/malinkang/weread2notion/assets/3365208/f230a01f-bc1a-48dc-95f6-ac7ad0d1ecc5" ></div> | <div align="center"><img src="https://images.malinkang.com/2024/04/b225b17d60670e4a6ff3459bbde80d28.jpg" width="50%"></div> |
+### 分支说明
 
+建议在仓库 `cuiwsheng/weread2notion-pro` 使用分支 **`feature/weread-skills-api`** 进行配置与测试，验证通过后再合并到 `main`。
+
+## 本地运行
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+
+export WEREAD_API_KEY=wrk-xxxxxxxx
+export NOTION_TOKEN=secret_xxx
+export NOTION_PAGE=https://www.notion.so/...
+
+python scripts/book.py
+python scripts/weread.py
+python scripts/read_time.py
+```
+
+## 已移除的配置
+
+以下 Secrets **不再需要**：
+
+- `WEREAD_COOKIE`
+- `CC_URL` / `CC_ID` / `CC_PASSWORD`
 
 ## 捐赠
 
-如果你觉得本项目帮助了你，请作者喝一杯咖啡，你的支持是作者最大的动力。本项目会持续更新。
+如果你觉得本项目有帮助，欢迎支持作者持续维护。
 
-| 支付宝支付 | 微信支付 |
-| --- | --- |
-| <div align="center"><img src="https://images.malinkang.com/2024/03/7fd0feb1145f19fab3821ff1d4631f85.jpg" width="50%"></div> | <div align="center"><img src="https://images.malinkang.com/2024/03/d34f577490a32d4440c8a22f57af41da.jpg" width="50%"></div> |
+| 支付宝 | 微信 |
+|--------|------|
+| <img src="https://images.malinkang.com/2024/03/7fd0feb1145f19fab3821ff1d4631f85.jpg" width="200"> | <img src="https://images.malinkang.com/2024/03/d34f577490a32d4440c8a22f57af41da.jpg" width="200"> |
 
-## 其他项目
-* [WeRead2Notion-Pro](https://github.com/malinkang/weread2notion-pro)
-* [WeRead2Notion](https://github.com/malinkang/weread2notion)
-* [Podcast2Notion](https://github.com/malinkang/podcast2notion)
-* [Douban2Notion](https://github.com/malinkang/douban2notion)
-* [Keep2Notion](https://github.com/malinkang/keep2notion)
+## 相关项目
+
+- [WeRead2Notion-Pro](https://github.com/malinkang/weread2notion-pro)
+- [WeRead2Notion](https://github.com/malinkang/weread2notion)
+- [Podcast2Notion](https://github.com/malinkang/podcast2notion)

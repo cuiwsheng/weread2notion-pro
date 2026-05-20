@@ -14,10 +14,7 @@ jobs:
     env:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       NOTION_PAGE: ${{ secrets.NOTION_PAGE }}
-      WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
-      CC_URL: ${{ secrets.CC_URL }}
-      CC_ID: ${{ secrets.CC_ID }}
-      CC_PASSWORD: ${{ secrets.CC_PASSWORD }}
+      WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
       HEATMAP_BLOCK_ID: ${{ secrets.HEATMAP_BLOCK_ID }}
       BOOK_DATABASE_NAME: ${{ vars.BOOK_DATABASE_NAME }}
       AUTHOR_DATABASE_NAME: ${{ vars.AUTHOR_DATABASE_NAME }}
@@ -34,11 +31,11 @@ jobs:
       YEAR: ${{ vars.YEAR }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: "3.11"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -48,25 +45,37 @@ jobs:
       - name: Set default year if not provided
         run: echo "YEAR=$(date +"%Y")" >> $GITHUB_ENV
         if: env.YEAR == ''
-      - name: weread heatmap
+      - name: Sync read time and export heatmap data
         run: |
-          github_heatmap weread  --year $YEAR  --me "${{secrets.NAME}}" --without-type-name --background-color=${{ vars.background_color||'#FFFFFF'}} --track-color=${{ vars.track_color||'#ACE7AE'}} --special-color1=${{ vars.special_color||'#69C16E'}} --special-color2=${{ vars.special_color2||'#549F57'}} --dom-color=${{ vars.dom_color||'#EBEDF0'}} --text-color=${{ vars.text_color||'#000000'}}
-      - name: Rename weread.svg to a random name
+          python -u scripts/read_time.py
+      - name: Generate heatmap SVG
+        run: |
+          github_heatmap json \
+            --json_file OUT_FOLDER/data.json \
+            --year $YEAR \
+            --me "${{ secrets.NAME }}" \
+            --without-type-name \
+            --background-color=${{ vars.background_color || '#FFFFFF' }} \
+            --track-color=${{ vars.track_color || '#ACE7AE' }} \
+            --special-color1=${{ vars.special_color || '#69C16E' }} \
+            --special-color2=${{ vars.special_color2 || '#549F57' }} \
+            --dom-color=${{ vars.dom_color || '#EBEDF0' }} \
+            --text-color=${{ vars.text_color || '#000000' }}
+      - name: Rename heatmap SVG
         run: |
           cd OUT_FOLDER
-          find . -type f ! -name "weread.svg" -exec rm -f {} +
+          find . -type f ! -name "*.svg" -exec rm -f {} +
           cd ..
           RANDOM_FILENAME=$(uuidgen).svg
-          mv ./OUT_FOLDER/weread.svg ./OUT_FOLDER/$RANDOM_FILENAME
+          mv ./OUT_FOLDER/*.svg ./OUT_FOLDER/$RANDOM_FILENAME
           echo "Renamed file to $RANDOM_FILENAME"
-      - name: push
+      - name: Push heatmap assets
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add .
           git commit -m 'add new heatmap' || echo "nothing to commit"
           git push || echo "nothing to push"
-      - name: read time sync
+      - name: Update Notion heatmap embed
         run: |
-          python -u scripts/read_time.py
-      
+          HEATMAP_UPDATE_ONLY=1 python -u scripts/read_time.py

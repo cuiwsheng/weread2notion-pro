@@ -1,2 +1,5 @@
 scripts/__pycache__/
 .env
+.venv/
+weread-skills/
+weread-skills.zip

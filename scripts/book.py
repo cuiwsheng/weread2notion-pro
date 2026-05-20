@@ -214,8 +214,8 @@ if __name__ == "__main__":
             not_need_sync.append(key)
     notebooks = weread_api.get_notebooklist()
     notebooks = [d["bookId"] for d in notebooks if "bookId" in d]
-    books = bookshelf_books.get("books")
-    books = [d["bookId"] for d in books if "bookId" in d]
+    books = bookshelf_books.get("books") or []
+    books = [d["bookId"] for d in books if d.get("bookId")]
     books = list((set(notebooks) | set(books)) - set(not_need_sync))
     for index, bookId in enumerate(books):
         insert_book_to_notion(books, index, bookId)
