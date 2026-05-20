@@ -4,6 +4,7 @@ import re
 import time
 
 from notion_client import Client
+from notion_client.errors import APIResponseError
 from retrying import retry
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -42,14 +43,23 @@ class NotionHelper:
     def __init__(self):
         self.client = Client(auth=os.getenv("NOTION_TOKEN"), log_level=logging.ERROR)
         self.__cache = {}
-        self.page_id = self.extract_page_id(os.getenv("NOTION_PAGE"))
-        self.search_database(self.page_id)
         for key in self.database_name_dict.keys():
-            if os.getenv(key) != None and os.getenv(key) != "":
+            if os.getenv(key) not in (None, ""):
                 self.database_name_dict[key] = os.getenv(key)
+        heatmap_block_id = os.getenv("HEATMAP_BLOCK_ID", "").strip()
+        if heatmap_block_id:
+            self.heatmap_block_id = self.normalize_notion_id(heatmap_block_id)
+        self.page_id = self.extract_page_id(os.getenv("NOTION_PAGE"))
+        self._discover_databases()
         self.book_database_id = self.database_id_dict.get(
             self.database_name_dict.get("BOOK_DATABASE_NAME")
         )
+        if not self.book_database_id:
+            raise Exception(
+                "未找到「书架」数据库。请确认 NOTION_PAGE 指向包含书架子库的父页面，"
+                "且该页面与子数据库均已通过 Connections 授权给 Notion 集成（WeReadPro）。"
+                f"当前 page_id={self.page_id}"
+            )
         r = self.client.databases.retrieve(database_id=self.book_database_id)
         for key, value in r.get("properties").items():
             self.property_dict[key] = value
@@ -100,16 +110,81 @@ class NotionHelper:
     def get_relation_database_id(self, property):
         return property.get("relation").get("database_id")
 
+    @staticmethod
+    def normalize_notion_id(raw_id):
+        raw_id = (raw_id or "").strip().replace("-", "")
+        if len(raw_id) != 32:
+            return raw_id
+        return (
+            f"{raw_id[0:8]}-{raw_id[8:12]}-{raw_id[12:16]}-"
+            f"{raw_id[16:20]}-{raw_id[20:32]}"
+        )
+
+    @staticmethod
+    def _plain_title(title_prop):
+        if isinstance(title_prop, str):
+            return title_prop
+        parts = []
+        for item in title_prop or []:
+            if item.get("type") == "text":
+                parts.append(item.get("plain_text") or item.get("text", {}).get("content", ""))
+        return "".join(parts)
+
+    @staticmethod
+    def _is_not_found_error(error):
+        if isinstance(error, APIResponseError):
+            return error.code in ("object_not_found", "validation_error")
+        return "404" in str(error) or "not found" in str(error).lower()
+
     def extract_page_id(self, notion_url):
-        # 正则表达式匹配 32 个字符的 Notion page_id
+        if not notion_url or not str(notion_url).strip():
+            raise Exception("NOTION_PAGE 未配置，请在 GitHub Secrets 中设置父页面 URL")
+        notion_url = str(notion_url).strip().strip('"').strip("'")
         match = re.search(
             r"([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
             notion_url,
+            re.IGNORECASE,
         )
         if match:
-            return match.group(0)
-        else:
-            raise Exception(f"获取NotionID失败，请检查输入的Url是否正确")
+            return self.normalize_notion_id(match.group(0))
+        raise Exception(f"获取 Notion ID 失败，请检查 NOTION_PAGE URL 是否正确: {notion_url}")
+
+    def _discover_databases(self):
+        try:
+            self.search_database(self.page_id)
+        except Exception as error:
+            if not self._is_not_found_error(error):
+                raise
+            print(
+                f"警告: 无法遍历 Notion 页面 {self.page_id}（{error}），"
+                "将改为搜索已授权的数据库。"
+            )
+            self._discover_databases_via_search()
+        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if not self.database_id_dict.get(book_name):
+            self._discover_databases_via_search()
+
+    def _discover_databases_via_search(self):
+        names = set(self.database_name_dict.values())
+        names.update(["日", "周", "月", "年", "划线", "读书笔记", "章节", "分类", "作者"])
+        for name in names:
+            if name and name not in self.database_id_dict:
+                db_id = self._search_database_by_title(name)
+                if db_id:
+                    self.database_id_dict[name] = db_id
+
+    def _search_database_by_title(self, title):
+        response = self.client.search(
+            query=title,
+            filter={"property": "object", "value": "database"},
+            page_size=20,
+        )
+        for item in response.get("results", []):
+            if item.get("object") != "database":
+                continue
+            if self._plain_title(item.get("title")) == title:
+                return item["id"]
+        return None
 
     def search_database(self, block_id):
         children = self.client.blocks.children.list(block_id=block_id)["results"]
@@ -117,9 +192,9 @@ class NotionHelper:
         for child in children:
             # 检查子块的类型
             if child["type"] == "child_database":
-                self.database_id_dict[child.get("child_database").get("title")] = (
-                    child.get("id")
-                )
+                title = self._plain_title(child.get("child_database", {}).get("title"))
+                if title:
+                    self.database_id_dict[title] = child.get("id")
             elif child["type"] == "embed" and child.get("embed").get("url"):
                 if (
                     child.get("embed")
