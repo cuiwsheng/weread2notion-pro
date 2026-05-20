@@ -59,7 +59,12 @@ python scripts/read_time.py
 1. **NOTION_PAGE** 必须是包含「书架」「日」等子数据库的**父页面**完整 URL（浏览器地址栏复制），不是单个数据库的链接。
 2. 在 Notion 打开该父页面 → 右上角 **⋯** → **Connections** → 添加你的集成（如 WeReadPro）。
 3. 子数据库也需在同一集成下可见（通常授权父页面即可）。
-4. 若页面 ID 无法遍历，脚本会自动改为按数据库名称搜索；请确保 `BOOK_DATABASE_NAME` 等 `vars` 与 Notion 中数据库标题一致（默认为「书架」）。
+4. 若页面 ID 无法遍历，脚本会自动搜索已授权的 data source；请确保 `BOOK_DATABASE_NAME` 等 `vars` 与 Notion 中数据库标题一致（默认为「书架」）。
+5. 仍失败时，可在 Secrets 中直接设置 `BOOK_DATABASE_ID`（书架数据库 ID，32 位 UUID）。
+
+### Search API `data_source` 报错
+
+若日志出现 `filter.value should be "data_source"`，请使用本分支最新代码（已适配 Notion 2025+ API）。
 
 ## 捐赠
 

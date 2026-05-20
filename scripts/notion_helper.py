@@ -56,9 +56,12 @@ class NotionHelper:
         )
         if not self.book_database_id:
             raise Exception(
-                "未找到「书架」数据库。请确认 NOTION_PAGE 指向包含书架子库的父页面，"
-                "且该页面与子数据库均已通过 Connections 授权给 Notion 集成（WeReadPro）。"
-                f"当前 page_id={self.page_id}"
+                "未找到「书架」数据库。请任选其一：\n"
+                "1) NOTION_PAGE 设为包含「书架」子库的父页面 URL，并授权集成 WeReadPro；\n"
+                "2) NOTION_PAGE 直接填「书架」数据库的 URL；\n"
+                "3) 在 Secrets 中设置 BOOK_DATABASE_ID 为书架数据库 ID。\n"
+                f"当前 page_id={self.page_id}，BOOK_DATABASE_NAME="
+                f"{self.database_name_dict.get('BOOK_DATABASE_NAME')}"
             )
         r = self.client.databases.retrieve(database_id=self.book_database_id)
         for key, value in r.get("properties").items():
@@ -149,7 +152,45 @@ class NotionHelper:
             return self.normalize_notion_id(match.group(0))
         raise Exception(f"获取 Notion ID 失败，请检查 NOTION_PAGE URL 是否正确: {notion_url}")
 
+    def _apply_database_id_env_overrides(self):
+        """Optional secrets: BOOK_DATABASE_ID, DAY_DATABASE_ID, etc."""
+        env_map = {
+            "BOOK_DATABASE_ID": "BOOK_DATABASE_NAME",
+            "CHAPTER_DATABASE_ID": "CHAPTER_DATABASE_NAME",
+            "READ_DATABASE_ID": "READ_DATABASE_NAME",
+            "DAY_DATABASE_ID": "DAY_DATABASE_NAME",
+            "WEEK_DATABASE_ID": "WEEK_DATABASE_NAME",
+            "MONTH_DATABASE_ID": "MONTH_DATABASE_NAME",
+            "YEAR_DATABASE_ID": "YEAR_DATABASE_NAME",
+        }
+        for env_key, name_key in env_map.items():
+            raw_id = os.getenv(env_key, "").strip()
+            if not raw_id:
+                continue
+            db_id = self.normalize_notion_id(raw_id)
+            name = self.database_name_dict.get(name_key) or os.getenv(name_key, "")
+            if name:
+                self.database_id_dict[name] = db_id
+
+    def _try_register_notion_id_as_book_database(self, notion_id):
+        """NOTION_PAGE may be a database URL instead of a parent page."""
+        try:
+            db = self.client.databases.retrieve(database_id=notion_id)
+        except Exception:
+            return False
+        title = self._plain_title(db.get("title"))
+        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if title:
+            self.database_id_dict[title] = notion_id
+        if book_name:
+            self.database_id_dict[book_name] = notion_id
+        return bool(book_name and self.database_id_dict.get(book_name))
+
     def _discover_databases(self):
+        self._apply_database_id_env_overrides()
+        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if self.database_id_dict.get(book_name):
+            return
         try:
             self.search_database(self.page_id)
         except Exception as error:
@@ -157,34 +198,55 @@ class NotionHelper:
                 raise
             print(
                 f"警告: 无法遍历 Notion 页面 {self.page_id}（{error}），"
-                "将改为搜索已授权的数据库。"
+                "尝试其他方式发现数据库。"
             )
-            self._discover_databases_via_search()
-        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if not self.database_id_dict.get(book_name):
+            if self._try_register_notion_id_as_book_database(self.page_id):
+                print(f"已将 NOTION_PAGE 识别为数据库「{book_name}」。")
+            else:
+                self._discover_databases_via_search()
         if not self.database_id_dict.get(book_name):
             self._discover_databases_via_search()
 
+    def _list_accessible_data_sources(self):
+        """List data sources/databases visible to the integration (Notion API 2025+)."""
+        catalog = {}
+        start_cursor = None
+        while True:
+            kwargs = {
+                "filter": {"property": "object", "value": "data_source"},
+                "page_size": 100,
+            }
+            if start_cursor:
+                kwargs["start_cursor"] = start_cursor
+            response = self.client.search(**kwargs)
+            for item in response.get("results", []):
+                if item.get("object") not in ("database", "data_source"):
+                    continue
+                title = self._plain_title(item.get("title"))
+                if title and title not in catalog:
+                    catalog[title] = item["id"]
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+        return catalog
+
     def _discover_databases_via_search(self):
+        catalog = self._list_accessible_data_sources()
         names = set(self.database_name_dict.values())
         names.update(["日", "周", "月", "年", "划线", "读书笔记", "章节", "分类", "作者"])
         for name in names:
-            if name and name not in self.database_id_dict:
-                db_id = self._search_database_by_title(name)
-                if db_id:
-                    self.database_id_dict[name] = db_id
+            if name and name not in self.database_id_dict and name in catalog:
+                self.database_id_dict[name] = catalog[name]
+        if catalog and not self.database_id_dict:
+            print(
+                "已搜索到以下数据库，但未匹配到「书架」："
+                + ", ".join(sorted(catalog.keys()))
+            )
 
     def _search_database_by_title(self, title):
-        response = self.client.search(
-            query=title,
-            filter={"property": "object", "value": "database"},
-            page_size=20,
-        )
-        for item in response.get("results", []):
-            if item.get("object") != "database":
-                continue
-            if self._plain_title(item.get("title")) == title:
-                return item["id"]
-        return None
+        catalog = self._list_accessible_data_sources()
+        return catalog.get(title)
 
     def search_database(self, block_id):
         children = self.client.blocks.children.list(block_id=block_id)["results"]
