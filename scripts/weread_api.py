@@ -7,7 +7,7 @@ import requests
 from retrying import retry
 
 WEREAD_GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway"
-SKILL_VERSION = "1.0.3"
+SKILL_VERSION = "1.0.5"
 
 
 class WeReadApi:
@@ -46,17 +46,6 @@ class WeReadApi:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_bookshelf(self):
         data = self._call("/shelf/sync")
-        if "bookProgress" not in data and data.get("books"):
-            data["bookProgress"] = [
-                {
-                    "bookId": b.get("bookId"),
-                    "readingTime": b.get("recordReadingTime")
-                    or b.get("readingTime")
-                    or 0,
-                }
-                for b in data["books"]
-                if b.get("bookId")
-            ]
         return data
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -146,7 +135,7 @@ class WeReadApi:
         """Daily read times for a calendar year (seconds per day)."""
         base = pendulum.datetime(int(year), 6, 15, tz="Asia/Shanghai").int_timestamp
         data = self._call("/readdata/detail", mode="annually", baseTime=base)
-        read_times = data.get("dailyReadTimes") or data.get("readTimes") or {}
+        read_times = data.get("dailyReadTimes") or {}
         return {str(k): v for k, v in read_times.items()}
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
