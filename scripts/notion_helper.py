@@ -24,6 +24,15 @@ from utils import (
 )
 
 load_dotenv()
+
+# 配置日志：默认 INFO 级别，可通过环境变量 LOG_LEVEL 调整
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
 TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
 USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 TARGET_ICON_URL = "https://www.notion.so/icons/target_red.svg"
@@ -69,7 +78,9 @@ class NotionHelper:
                 f"无法获取「书架」数据库的属性。请检查：\n"
                 f"1) NOTION_TOKEN 是否有访问权限；\n"
                 f"2) 数据库 ID ({self.book_database_id}) 是否正确；\n"
-                f"3) 集成是否已被授权访问该数据库。"
+                f"3) 集成是否已被授权访问该数据库。\n"
+                f"注意：Notion 2025+ API 中，部分数据库类型为 data_source，\n"
+                f"请确认集成有足够权限访问数据源。查看日志获取详细诊断信息。"
             )
         for key, value in properties.items():
             self.property_dict[key] = value
@@ -242,6 +253,10 @@ class NotionHelper:
         """
         获取数据库属性，兼容 Notion 2025 data_source API。
         
+        在 Notion 2025+ API 中，databases.retrieve 可能返回：
+        1. object="database" 且直接包含 properties
+        2. object="data_source"，properties 位于 data_sources 字段中
+        
         Args:
             database_id: 数据库 ID
             
@@ -250,20 +265,63 @@ class NotionHelper:
         """
         try:
             response = self.client.databases.retrieve(database_id=database_id)
+            object_type = response.get("object", "unknown")
             properties = response.get("properties")
+            
+            logging.debug(
+                f"数据库 {database_id} 返回 object={object_type}, "
+                f"properties={'存在' if properties else '不存在'}"
+            )
+            
+            # 情况 1: 直接返回 properties
             if properties:
+                logging.debug(f"数据库 {database_id} 直接包含 properties，共 {len(properties)} 个")
                 return properties
             
-            if response.get("object") == "data_source":
-                catalog = self._list_accessible_data_sources()
-                for item_id in catalog.values():
-                    if item_id == database_id:
-                        retry_response = self.client.databases.retrieve(database_id=database_id)
-                        return retry_response.get("properties")
+            # 情况 2: object="data_source"，尝试从 data_sources 字段获取
+            data_sources = response.get("data_sources")
+            if data_sources and isinstance(data_sources, list) and len(data_sources) > 0:
+                primary_ds = data_sources[0]
+                logging.debug(
+                    f"数据库 {database_id} 包含 data_sources，"
+                    f"尝试从主数据源 {primary_ds.get('id', 'unknown')} 获取属性"
+                )
+                
+                # 尝试从 data_source 对象中直接读取 properties
+                ds_properties = primary_ds.get("properties")
+                if ds_properties:
+                    logging.debug(f"从 data_sources[0] 获取到 {len(ds_properties)} 个属性")
+                    return ds_properties
+                
+                # 尝试单独请求 data_source
+                ds_id = primary_ds.get("id")
+                if ds_id:
+                    try:
+                        # 尝试使用 data_sources API（如果存在）
+                        if hasattr(self.client, 'data_sources'):
+                            ds_response = self.client.data_sources.retrieve(data_source_id=ds_id)
+                            ds_properties = ds_response.get("properties")
+                            if ds_properties:
+                                logging.debug(f"通过 data_sources.retrieve 获取到 {len(ds_properties)} 个属性")
+                                return ds_properties
+                        else:
+                            # 回退：使用 databases.retrieve 尝试获取 data_source
+                            logging.debug(f"client 无 data_sources 属性，尝试用 databases.retrieve({ds_id})")
+                            ds_response = self.client.databases.retrieve(database_id=ds_id)
+                            ds_properties = ds_response.get("properties")
+                            if ds_properties:
+                                logging.debug(f"通过 databases.retrieve(data_source_id) 获取到 {len(ds_properties)} 个属性")
+                                return ds_properties
+                    except Exception as ds_error:
+                        logging.warning(f"尝试获取 data_source {ds_id} 属性失败: {ds_error}")
             
+            logging.warning(
+                f"数据库 {database_id} (object={object_type}) 未能获取 properties。"
+                f"data_sources={'存在' if data_sources else '不存在'}"
+            )
             return None
         except Exception as e:
-            print(f"警告: 获取数据库 {database_id} 属性时出错: {e}")
+            logging.error(f"获取数据库 {database_id} 属性时出错: {e}")
             return None
 
     def _discover_databases_via_search(self):
@@ -304,10 +362,15 @@ class NotionHelper:
                 self.search_database(child["id"])
 
     def update_book_database(self):
-        """更新数据库"""
+        """
+        更新数据库属性。
+        
+        注意：Notion 2025 API 中，若数据库为 data_source 类型，
+        databases.update 可能需要特殊处理。当前先尝试标准更新。
+        """
         properties = self._get_database_properties(self.book_database_id)
         if not properties:
-            print(f"警告: 无法获取书架数据库属性，跳过更新")
+            logging.warning(f"无法获取书架数据库 {self.book_database_id} 的属性，跳过更新")
             return
         
         update_properties = {}
