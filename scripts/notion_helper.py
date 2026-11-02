@@ -63,8 +63,15 @@ class NotionHelper:
                 f"当前 page_id={self.page_id}，BOOK_DATABASE_NAME="
                 f"{self.database_name_dict.get('BOOK_DATABASE_NAME')}"
             )
-        r = self.client.databases.retrieve(database_id=self.book_database_id)
-        for key, value in r.get("properties").items():
+        properties = self._get_database_properties(self.book_database_id)
+        if not properties:
+            raise Exception(
+                f"无法获取「书架」数据库的属性。请检查：\n"
+                f"1) NOTION_TOKEN 是否有访问权限；\n"
+                f"2) 数据库 ID ({self.book_database_id}) 是否正确；\n"
+                f"3) 集成是否已被授权访问该数据库。"
+            )
+        for key, value in properties.items():
             self.property_dict[key] = value
         self.review_database_id = self.get_relation_database_id(
             self.property_dict.get("读书笔记")
@@ -231,6 +238,34 @@ class NotionHelper:
             start_cursor = response.get("next_cursor")
         return catalog
 
+    def _get_database_properties(self, database_id):
+        """
+        获取数据库属性，兼容 Notion 2025 data_source API。
+        
+        Args:
+            database_id: 数据库 ID
+            
+        Returns:
+            dict: 数据库属性字典，若无法获取则返回 None
+        """
+        try:
+            response = self.client.databases.retrieve(database_id=database_id)
+            properties = response.get("properties")
+            if properties:
+                return properties
+            
+            if response.get("object") == "data_source":
+                catalog = self._list_accessible_data_sources()
+                for item_id in catalog.values():
+                    if item_id == database_id:
+                        retry_response = self.client.databases.retrieve(database_id=database_id)
+                        return retry_response.get("properties")
+            
+            return None
+        except Exception as e:
+            print(f"警告: 获取数据库 {database_id} 属性时出错: {e}")
+            return None
+
     def _discover_databases_via_search(self):
         catalog = self._list_accessible_data_sources()
         names = set(self.database_name_dict.values())
@@ -270,9 +305,11 @@ class NotionHelper:
 
     def update_book_database(self):
         """更新数据库"""
-        response = self.client.databases.retrieve(database_id=self.book_database_id)
-        id = response.get("id")
-        properties = response.get("properties")
+        properties = self._get_database_properties(self.book_database_id)
+        if not properties:
+            print(f"警告: 无法获取书架数据库属性，跳过更新")
+            return
+        
         update_properties = {}
         if (
             properties.get("阅读时长") is None
@@ -303,7 +340,7 @@ class NotionHelper:
         # if properties.get("NeoDB链接") is None or properties.get("NeoDB链接").get("type") != "url":
         #     update_properties["NeoDB链接"] = {"url": {}}
         if len(update_properties) > 0:
-            self.client.databases.update(database_id=id, properties=update_properties)
+            self.client.databases.update(database_id=self.book_database_id, properties=update_properties)
 
     def create_database(self):
         title = [
