@@ -103,12 +103,12 @@ def insert_book_to_notion(books, index, bookId):
             )
             for x in book.get("author").split(" ")
         ]
-        if book.get("categories"):
+        if book.get("category"):
             book["分类"] = [
                 notion_helper.get_relation_id(
                     x.get("title"), notion_helper.category_database_id, TAG_ICON_URL
                 )
-                for x in book.get("categories")
+                for x in book.get("category")
             ]
     properties = utils.get_properties(book, book_properties_type_dict)
     if book.get("时间"):
@@ -190,21 +190,15 @@ if __name__ == "__main__":
     notion_helper = NotionHelper()
     notion_books = notion_helper.get_all_book()
     bookshelf_books = weread_api.get_bookshelf()
-    bookProgress = bookshelf_books.get("bookProgress")
-    bookProgress = {book.get("bookId"): book for book in bookProgress}
     archive_dict = {}
-    for archive in bookshelf_books.get("archive"):
+    for archive in bookshelf_books.get("archive") or []:
         name = archive.get("name")
         bookIds = archive.get("bookIds")
         archive_dict.update({bookId: name for bookId in bookIds})
     not_need_sync = []
     for key, value in notion_books.items():
         if (
-            (
-                key not in bookProgress
-                or value.get("readingTime") == bookProgress.get(key).get("readingTime")
-            )
-            and (archive_dict.get(key) == value.get("category"))
+            (archive_dict.get(key) == value.get("category"))
             and (value.get("cover") is not None)
             and (
                 value.get("status") != "已读"

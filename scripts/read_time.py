@@ -166,8 +166,11 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Annual readdata fetch skipped: {e}")
 
-    monthly = weread_api.get_api_data().get("readTimes") or {}
-    read_times.update({int(k): v for k, v in monthly.items()})
+    try:
+        monthly = weread_api.get_api_data().get("readTimes") or {}
+        read_times.update({int(k): v for k, v in monthly.items()})
+    except Exception as e:
+        print(f"Monthly readdata fetch skipped: {e}")
 
     sync_read_times_to_notion(helper, read_times)
     export_heatmap_json(helper, year, read_times_seconds=read_times)
