@@ -4,6 +4,7 @@ import re
 import time
 
 from notion_client import Client
+from notion_client.errors import APIResponseError
 from retrying import retry
 from datetime import timedelta
 from dotenv import load_dotenv
@@ -23,6 +24,15 @@ from utils import (
 )
 
 load_dotenv()
+
+# 配置日志：默认 INFO 级别，可通过环境变量 LOG_LEVEL 调整
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
 TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
 USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 TARGET_ICON_URL = "https://www.notion.so/icons/target_red.svg"
@@ -42,16 +52,38 @@ class NotionHelper:
     def __init__(self):
         self.client = Client(auth=os.getenv("NOTION_TOKEN"), log_level=logging.ERROR)
         self.__cache = {}
-        self.page_id = self.extract_page_id(os.getenv("NOTION_PAGE"))
-        self.search_database(self.page_id)
+        self.__data_source_cache = {}
         for key in self.database_name_dict.keys():
-            if os.getenv(key) != None and os.getenv(key) != "":
+            if os.getenv(key) not in (None, ""):
                 self.database_name_dict[key] = os.getenv(key)
+        heatmap_block_id = os.getenv("HEATMAP_BLOCK_ID", "").strip()
+        if heatmap_block_id:
+            self.heatmap_block_id = self.normalize_notion_id(heatmap_block_id)
+        self.page_id = self.extract_page_id(os.getenv("NOTION_PAGE"))
+        self._discover_databases()
         self.book_database_id = self.database_id_dict.get(
             self.database_name_dict.get("BOOK_DATABASE_NAME")
         )
-        r = self.client.databases.retrieve(database_id=self.book_database_id)
-        for key, value in r.get("properties").items():
+        if not self.book_database_id:
+            raise Exception(
+                "未找到「书架」数据库。请任选其一：\n"
+                "1) NOTION_PAGE 设为包含「书架」子库的父页面 URL，并授权集成 WeReadPro；\n"
+                "2) NOTION_PAGE 直接填「书架」数据库的 URL；\n"
+                "3) 在 Secrets 中设置 BOOK_DATABASE_ID 为书架数据库 ID。\n"
+                f"当前 page_id={self.page_id}，BOOK_DATABASE_NAME="
+                f"{self.database_name_dict.get('BOOK_DATABASE_NAME')}"
+            )
+        properties = self._get_database_properties(self.book_database_id)
+        if not properties:
+            raise Exception(
+                f"无法获取「书架」数据库的属性。请检查：\n"
+                f"1) NOTION_TOKEN 是否有访问权限；\n"
+                f"2) 数据库 ID ({self.book_database_id}) 是否正确；\n"
+                f"3) 集成是否已被授权访问该数据库。\n"
+                f"注意：Notion 2025+ API 中，部分数据库类型为 data_source，\n"
+                f"请确认集成有足够权限访问数据源。查看日志获取详细诊断信息。"
+            )
+        for key, value in properties.items():
             self.property_dict[key] = value
         self.review_database_id = self.get_relation_database_id(
             self.property_dict.get("读书笔记")
@@ -100,16 +132,256 @@ class NotionHelper:
     def get_relation_database_id(self, property):
         return property.get("relation").get("database_id")
 
+    @staticmethod
+    def normalize_notion_id(raw_id):
+        raw_id = (raw_id or "").strip().replace("-", "")
+        if len(raw_id) != 32:
+            return raw_id
+        return (
+            f"{raw_id[0:8]}-{raw_id[8:12]}-{raw_id[12:16]}-"
+            f"{raw_id[16:20]}-{raw_id[20:32]}"
+        )
+
+    @staticmethod
+    def _plain_title(title_prop):
+        if isinstance(title_prop, str):
+            return title_prop
+        parts = []
+        for item in title_prop or []:
+            if item.get("type") == "text":
+                parts.append(item.get("plain_text") or item.get("text", {}).get("content", ""))
+        return "".join(parts)
+
+    @staticmethod
+    def _is_not_found_error(error):
+        if isinstance(error, APIResponseError):
+            return error.code in ("object_not_found", "validation_error")
+        return "404" in str(error) or "not found" in str(error).lower()
+
     def extract_page_id(self, notion_url):
-        # 正则表达式匹配 32 个字符的 Notion page_id
+        if not notion_url or not str(notion_url).strip():
+            raise Exception("NOTION_PAGE 未配置，请在 GitHub Secrets 中设置父页面 URL")
+        notion_url = str(notion_url).strip().strip('"').strip("'")
         match = re.search(
             r"([a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})",
             notion_url,
+            re.IGNORECASE,
         )
         if match:
-            return match.group(0)
-        else:
-            raise Exception(f"获取NotionID失败，请检查输入的Url是否正确")
+            return self.normalize_notion_id(match.group(0))
+        raise Exception(f"获取 Notion ID 失败，请检查 NOTION_PAGE URL 是否正确: {notion_url}")
+
+    def _apply_database_id_env_overrides(self):
+        """Optional secrets: BOOK_DATABASE_ID, DAY_DATABASE_ID, etc."""
+        env_map = {
+            "BOOK_DATABASE_ID": "BOOK_DATABASE_NAME",
+            "CHAPTER_DATABASE_ID": "CHAPTER_DATABASE_NAME",
+            "READ_DATABASE_ID": "READ_DATABASE_NAME",
+            "DAY_DATABASE_ID": "DAY_DATABASE_NAME",
+            "WEEK_DATABASE_ID": "WEEK_DATABASE_NAME",
+            "MONTH_DATABASE_ID": "MONTH_DATABASE_NAME",
+            "YEAR_DATABASE_ID": "YEAR_DATABASE_NAME",
+        }
+        for env_key, name_key in env_map.items():
+            raw_id = os.getenv(env_key, "").strip()
+            if not raw_id:
+                continue
+            db_id = self.normalize_notion_id(raw_id)
+            name = self.database_name_dict.get(name_key) or os.getenv(name_key, "")
+            if name:
+                self.database_id_dict[name] = db_id
+
+    def _try_register_notion_id_as_book_database(self, notion_id):
+        """NOTION_PAGE may be a database URL instead of a parent page."""
+        try:
+            db = self.client.databases.retrieve(database_id=notion_id)
+        except Exception:
+            return False
+        title = self._plain_title(db.get("title"))
+        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if title:
+            self.database_id_dict[title] = notion_id
+        if book_name:
+            self.database_id_dict[book_name] = notion_id
+        return bool(book_name and self.database_id_dict.get(book_name))
+
+    def _discover_databases(self):
+        self._apply_database_id_env_overrides()
+        book_name = self.database_name_dict.get("BOOK_DATABASE_NAME")
+        if self.database_id_dict.get(book_name):
+            return
+        try:
+            self.search_database(self.page_id)
+        except Exception as error:
+            if not self._is_not_found_error(error):
+                raise
+            print(
+                f"警告: 无法遍历 Notion 页面 {self.page_id}（{error}），"
+                "尝试其他方式发现数据库。"
+            )
+        if not self.database_id_dict.get(book_name):
+            if self._try_register_notion_id_as_book_database(self.page_id):
+                print(f"已将 NOTION_PAGE 识别为数据库「{book_name}」。")
+            else:
+                self._discover_databases_via_search()
+        if not self.database_id_dict.get(book_name):
+            self._discover_databases_via_search()
+
+    def _list_accessible_data_sources(self):
+        """List data sources/databases visible to the integration (Notion API 2025+)."""
+        catalog = {}
+        start_cursor = None
+        while True:
+            kwargs = {
+                "filter": {"property": "object", "value": "data_source"},
+                "page_size": 100,
+            }
+            if start_cursor:
+                kwargs["start_cursor"] = start_cursor
+            response = self.client.search(**kwargs)
+            for item in response.get("results", []):
+                if item.get("object") not in ("database", "data_source"):
+                    continue
+                title = self._plain_title(item.get("title"))
+                if title and title not in catalog:
+                    catalog[title] = item["id"]
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+        return catalog
+
+    def _resolve_data_source_id(self, database_id):
+        """
+        将 database_id 解析为 data_source_id（Notion 2025+ API）。
+        
+        在 Notion 2025+ API 中，查询操作需要使用 data_source_id 而非 database_id。
+        此方法复用 _get_database_properties 的逻辑来获取 data_source_id。
+        
+        Args:
+            database_id: 数据库 ID
+            
+        Returns:
+            str: data_source_id，如果无法解析则返回原 database_id
+        """
+        if database_id in self.__data_source_cache:
+            return self.__data_source_cache[database_id]
+        
+        try:
+            response = self.client.databases.retrieve(database_id=database_id)
+            
+            # 检查是否为 data_source 类型
+            data_sources = response.get("data_sources")
+            if data_sources and isinstance(data_sources, list) and len(data_sources) > 0:
+                ds_id = data_sources[0].get("id")
+                if ds_id:
+                    logging.debug(f"数据库 {database_id} 解析为 data_source {ds_id}")
+                    self.__data_source_cache[database_id] = ds_id
+                    return ds_id
+            
+            # 如果不是 data_source 类型，返回原 database_id
+            logging.debug(f"数据库 {database_id} 为传统数据库，无需解析")
+            self.__data_source_cache[database_id] = database_id
+            return database_id
+        except Exception as e:
+            logging.warning(f"解析 database_id {database_id} 失败: {e}，使用原 ID")
+            self.__data_source_cache[database_id] = database_id
+            return database_id
+
+    def _get_database_properties(self, database_id):
+        """
+        获取数据库属性，兼容 Notion 2025 data_source API。
+        
+        在 Notion 2025+ API 中，databases.retrieve 可能返回：
+        1. object="database" 且直接包含 properties
+        2. object="data_source"，properties 位于 data_sources 字段中
+        
+        Args:
+            database_id: 数据库 ID
+            
+        Returns:
+            dict: 数据库属性字典，若无法获取则返回 None
+        """
+        try:
+            response = self.client.databases.retrieve(database_id=database_id)
+            object_type = response.get("object", "unknown")
+            properties = response.get("properties")
+            
+            logging.debug(
+                f"数据库 {database_id} 返回 object={object_type}, "
+                f"properties={'存在' if properties else '不存在'}"
+            )
+            
+            # 情况 1: 直接返回 properties
+            if properties:
+                logging.debug(f"数据库 {database_id} 直接包含 properties，共 {len(properties)} 个")
+                return properties
+            
+            # 情况 2: object="data_source"，尝试从 data_sources 字段获取
+            data_sources = response.get("data_sources")
+            if data_sources and isinstance(data_sources, list) and len(data_sources) > 0:
+                primary_ds = data_sources[0]
+                ds_id = primary_ds.get("id")
+                logging.debug(
+                    f"数据库 {database_id} 包含 data_sources，"
+                    f"尝试从主数据源 {ds_id or 'unknown'} 获取属性"
+                )
+                
+                # 缓存 data_source_id 映射
+                if ds_id:
+                    self.__data_source_cache[database_id] = ds_id
+                
+                # 尝试从 data_source 对象中直接读取 properties
+                ds_properties = primary_ds.get("properties")
+                if ds_properties:
+                    logging.debug(f"从 data_sources[0] 获取到 {len(ds_properties)} 个属性")
+                    return ds_properties
+                
+                # 尝试单独请求 data_source
+                if ds_id:
+                    try:
+                        # 尝试使用 data_sources API（如果存在）
+                        if hasattr(self.client, 'data_sources'):
+                            ds_response = self.client.data_sources.retrieve(data_source_id=ds_id)
+                            ds_properties = ds_response.get("properties")
+                            if ds_properties:
+                                logging.debug(f"通过 data_sources.retrieve 获取到 {len(ds_properties)} 个属性")
+                                return ds_properties
+                        else:
+                            # 回退：使用 databases.retrieve 尝试获取 data_source
+                            logging.debug(f"client 无 data_sources 属性，尝试用 databases.retrieve({ds_id})")
+                            ds_response = self.client.databases.retrieve(database_id=ds_id)
+                            ds_properties = ds_response.get("properties")
+                            if ds_properties:
+                                logging.debug(f"通过 databases.retrieve(data_source_id) 获取到 {len(ds_properties)} 个属性")
+                                return ds_properties
+                    except Exception as ds_error:
+                        logging.warning(f"尝试获取 data_source {ds_id} 属性失败: {ds_error}")
+            
+            logging.warning(
+                f"数据库 {database_id} (object={object_type}) 未能获取 properties。"
+                f"data_sources={'存在' if data_sources else '不存在'}"
+            )
+            return None
+        except Exception as e:
+            logging.error(f"获取数据库 {database_id} 属性时出错: {e}")
+            return None
+
+    def _discover_databases_via_search(self):
+        catalog = self._list_accessible_data_sources()
+        names = set(self.database_name_dict.values())
+        names.update(["日", "周", "月", "年", "划线", "读书笔记", "章节", "分类", "作者"])
+        for name in names:
+            if name and name not in self.database_id_dict and name in catalog:
+                self.database_id_dict[name] = catalog[name]
+        if catalog and not self.database_id_dict:
+            print(
+                "已搜索到以下数据库，但未匹配到「书架」："
+                + ", ".join(sorted(catalog.keys()))
+            )
+
+    def _search_database_by_title(self, title):
+        catalog = self._list_accessible_data_sources()
+        return catalog.get(title)
 
     def search_database(self, block_id):
         children = self.client.blocks.children.list(block_id=block_id)["results"]
@@ -117,9 +389,9 @@ class NotionHelper:
         for child in children:
             # 检查子块的类型
             if child["type"] == "child_database":
-                self.database_id_dict[child.get("child_database").get("title")] = (
-                    child.get("id")
-                )
+                title = self._plain_title(child.get("child_database", {}).get("title"))
+                if title:
+                    self.database_id_dict[title] = child.get("id")
             elif child["type"] == "embed" and child.get("embed").get("url"):
                 if (
                     child.get("embed")
@@ -132,10 +404,17 @@ class NotionHelper:
                 self.search_database(child["id"])
 
     def update_book_database(self):
-        """更新数据库"""
-        response = self.client.databases.retrieve(database_id=self.book_database_id)
-        id = response.get("id")
-        properties = response.get("properties")
+        """
+        更新数据库属性。
+        
+        注意：Notion 2025 API 中，若数据库为 data_source 类型，
+        databases.update 可能需要特殊处理。当前先尝试标准更新。
+        """
+        properties = self._get_database_properties(self.book_database_id)
+        if not properties:
+            logging.warning(f"无法获取书架数据库 {self.book_database_id} 的属性，跳过更新")
+            return
+        
         update_properties = {}
         if (
             properties.get("阅读时长") is None
@@ -166,7 +445,7 @@ class NotionHelper:
         # if properties.get("NeoDB链接") is None or properties.get("NeoDB链接").get("type") != "url":
         #     update_properties["NeoDB链接"] = {"url": {}}
         if len(update_properties) > 0:
-            self.client.databases.update(database_id=id, properties=update_properties)
+            self.client.databases.update(database_id=self.book_database_id, properties=update_properties)
 
     def create_database(self):
         title = [
@@ -259,7 +538,7 @@ class NotionHelper:
         if key in self.__cache:
             return self.__cache.get(key)
         filter = {"property": "标题", "title": {"equals": name}}
-        response = self.client.databases.query(database_id=id, filter=filter)
+        response = self.query(database_id=id, filter=filter)
         if len(response.get("results")) == 0:
             parent = {"database_id": id, "type": "database_id"}
             properties["标题"] = get_title(name)
@@ -358,6 +637,16 @@ class NotionHelper:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query(self, **kwargs):
         kwargs = {k: v for k, v in kwargs.items() if v}
+        database_id = kwargs.get('database_id')
+        if database_id and hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            kwargs_copy = kwargs.copy()
+            kwargs_copy.pop('database_id', None)
+            kwargs_copy['data_source_id'] = data_source_id
+            try:
+                return self.client.data_sources.query(**kwargs_copy)
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
         return self.client.databases.query(**kwargs)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -412,6 +701,29 @@ class NotionHelper:
         results = []
         has_more = True
         start_cursor = None
+        
+        # 尝试使用 data_sources.query
+        if hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            try:
+                while has_more:
+                    response = self.client.data_sources.query(
+                        data_source_id=data_source_id,
+                        filter=filter,
+                        start_cursor=start_cursor,
+                        page_size=100,
+                    )
+                    start_cursor = response.get("next_cursor")
+                    has_more = response.get("has_more")
+                    results.extend(response.get("results"))
+                return results
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
+                results = []
+                has_more = True
+                start_cursor = None
+        
+        # 回退到 databases.query
         while has_more:
             response = self.client.databases.query(
                 database_id=database_id,
@@ -430,6 +742,28 @@ class NotionHelper:
         results = []
         has_more = True
         start_cursor = None
+        
+        # 尝试使用 data_sources.query
+        if hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            try:
+                while has_more:
+                    response = self.client.data_sources.query(
+                        data_source_id=data_source_id,
+                        start_cursor=start_cursor,
+                        page_size=100,
+                    )
+                    start_cursor = response.get("next_cursor")
+                    has_more = response.get("has_more")
+                    results.extend(response.get("results"))
+                return results
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
+                results = []
+                has_more = True
+                start_cursor = None
+        
+        # 回退到 databases.query
         while has_more:
             response = self.client.databases.query(
                 database_id=database_id,
