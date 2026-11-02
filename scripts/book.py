@@ -103,12 +103,24 @@ def insert_book_to_notion(books, index, bookId):
             )
             for x in book.get("author").split(" ")
         ]
-        if book.get("category"):
+        # Handle both "categories" and "category" keys; value may be list or bare string
+        raw_categories = book.get("categories") or book.get("category") or []
+        if isinstance(raw_categories, str):
+            raw_categories = [raw_categories]
+        category_titles = []
+        for item in raw_categories:
+            if isinstance(item, dict):
+                title = item.get("title")
+                if title and str(title).strip():
+                    category_titles.append(str(title).strip())
+            elif isinstance(item, str) and item.strip():
+                category_titles.append(item.strip())
+        if category_titles:
             book["分类"] = [
                 notion_helper.get_relation_id(
-                    x.get("title"), notion_helper.category_database_id, TAG_ICON_URL
+                    title, notion_helper.category_database_id, TAG_ICON_URL
                 )
-                for x in book.get("category")
+                for title in category_titles
             ]
     properties = utils.get_properties(book, book_properties_type_dict)
     if book.get("时间"):
