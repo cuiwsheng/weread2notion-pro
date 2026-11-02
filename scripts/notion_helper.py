@@ -52,6 +52,7 @@ class NotionHelper:
     def __init__(self):
         self.client = Client(auth=os.getenv("NOTION_TOKEN"), log_level=logging.ERROR)
         self.__cache = {}
+        self.__data_source_cache = {}
         for key in self.database_name_dict.keys():
             if os.getenv(key) not in (None, ""):
                 self.database_name_dict[key] = os.getenv(key)
@@ -249,6 +250,43 @@ class NotionHelper:
             start_cursor = response.get("next_cursor")
         return catalog
 
+    def _resolve_data_source_id(self, database_id):
+        """
+        将 database_id 解析为 data_source_id（Notion 2025+ API）。
+        
+        在 Notion 2025+ API 中，查询操作需要使用 data_source_id 而非 database_id。
+        此方法复用 _get_database_properties 的逻辑来获取 data_source_id。
+        
+        Args:
+            database_id: 数据库 ID
+            
+        Returns:
+            str: data_source_id，如果无法解析则返回原 database_id
+        """
+        if database_id in self.__data_source_cache:
+            return self.__data_source_cache[database_id]
+        
+        try:
+            response = self.client.databases.retrieve(database_id=database_id)
+            
+            # 检查是否为 data_source 类型
+            data_sources = response.get("data_sources")
+            if data_sources and isinstance(data_sources, list) and len(data_sources) > 0:
+                ds_id = data_sources[0].get("id")
+                if ds_id:
+                    logging.debug(f"数据库 {database_id} 解析为 data_source {ds_id}")
+                    self.__data_source_cache[database_id] = ds_id
+                    return ds_id
+            
+            # 如果不是 data_source 类型，返回原 database_id
+            logging.debug(f"数据库 {database_id} 为传统数据库，无需解析")
+            self.__data_source_cache[database_id] = database_id
+            return database_id
+        except Exception as e:
+            logging.warning(f"解析 database_id {database_id} 失败: {e}，使用原 ID")
+            self.__data_source_cache[database_id] = database_id
+            return database_id
+
     def _get_database_properties(self, database_id):
         """
         获取数据库属性，兼容 Notion 2025 data_source API。
@@ -282,10 +320,15 @@ class NotionHelper:
             data_sources = response.get("data_sources")
             if data_sources and isinstance(data_sources, list) and len(data_sources) > 0:
                 primary_ds = data_sources[0]
+                ds_id = primary_ds.get("id")
                 logging.debug(
                     f"数据库 {database_id} 包含 data_sources，"
-                    f"尝试从主数据源 {primary_ds.get('id', 'unknown')} 获取属性"
+                    f"尝试从主数据源 {ds_id or 'unknown'} 获取属性"
                 )
+                
+                # 缓存 data_source_id 映射
+                if ds_id:
+                    self.__data_source_cache[database_id] = ds_id
                 
                 # 尝试从 data_source 对象中直接读取 properties
                 ds_properties = primary_ds.get("properties")
@@ -294,7 +337,6 @@ class NotionHelper:
                     return ds_properties
                 
                 # 尝试单独请求 data_source
-                ds_id = primary_ds.get("id")
                 if ds_id:
                     try:
                         # 尝试使用 data_sources API（如果存在）
@@ -496,7 +538,7 @@ class NotionHelper:
         if key in self.__cache:
             return self.__cache.get(key)
         filter = {"property": "标题", "title": {"equals": name}}
-        response = self.client.databases.query(database_id=id, filter=filter)
+        response = self.query(database_id=id, filter=filter)
         if len(response.get("results")) == 0:
             parent = {"database_id": id, "type": "database_id"}
             properties["标题"] = get_title(name)
@@ -595,6 +637,16 @@ class NotionHelper:
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def query(self, **kwargs):
         kwargs = {k: v for k, v in kwargs.items() if v}
+        database_id = kwargs.get('database_id')
+        if database_id and hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            kwargs_copy = kwargs.copy()
+            kwargs_copy.pop('database_id', None)
+            kwargs_copy['data_source_id'] = data_source_id
+            try:
+                return self.client.data_sources.query(**kwargs_copy)
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
         return self.client.databases.query(**kwargs)
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -649,6 +701,29 @@ class NotionHelper:
         results = []
         has_more = True
         start_cursor = None
+        
+        # 尝试使用 data_sources.query
+        if hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            try:
+                while has_more:
+                    response = self.client.data_sources.query(
+                        data_source_id=data_source_id,
+                        filter=filter,
+                        start_cursor=start_cursor,
+                        page_size=100,
+                    )
+                    start_cursor = response.get("next_cursor")
+                    has_more = response.get("has_more")
+                    results.extend(response.get("results"))
+                return results
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
+                results = []
+                has_more = True
+                start_cursor = None
+        
+        # 回退到 databases.query
         while has_more:
             response = self.client.databases.query(
                 database_id=database_id,
@@ -667,6 +742,28 @@ class NotionHelper:
         results = []
         has_more = True
         start_cursor = None
+        
+        # 尝试使用 data_sources.query
+        if hasattr(self.client, 'data_sources'):
+            data_source_id = self._resolve_data_source_id(database_id)
+            try:
+                while has_more:
+                    response = self.client.data_sources.query(
+                        data_source_id=data_source_id,
+                        start_cursor=start_cursor,
+                        page_size=100,
+                    )
+                    start_cursor = response.get("next_cursor")
+                    has_more = response.get("has_more")
+                    results.extend(response.get("results"))
+                return results
+            except (AttributeError, Exception) as e:
+                logging.debug(f"data_sources.query 失败 ({e}), 回退到 databases.query")
+                results = []
+                has_more = True
+                start_cursor = None
+        
+        # 回退到 databases.query
         while has_more:
             response = self.client.databases.query(
                 database_id=database_id,
