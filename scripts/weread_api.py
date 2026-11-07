@@ -86,7 +86,8 @@ class WeReadApi:
     def get_read_info(self, bookId):
         """Normalize /book/getprogress to legacy readinfo shape for book.py."""
         data = self._call("/book/getprogress", bookId=bookId)
-        book = data.get("book") or {}
+        # Fix: support both nested {book: {progress:...}} and flat {progress:...} responses
+        book = data.get("book") or data
         progress = book.get("progress", 0) or 0
         reading_time = book.get("recordReadingTime", 0) or 0
         finish_time = book.get("finishTime")
