@@ -42,12 +42,14 @@ jobs:
       
       - name: Check imports (without secrets)
         run: |
-          # Verify scripts can be imported (structure check only, no API calls)
-          python -c "import sys; sys.path.insert(0, 'scripts'); 
-                     # Cannot import with missing env vars, just verify syntax
-                     import py_compile; 
-                     import os;
-                     for f in os.listdir('scripts'):
-                       if f.endswith('.py') and f != '__pycache__':
-                         py_compile.compile(os.path.join('scripts', f), doraise=True);
-                     print('All scripts compile successfully')"
+          python <<'PYEOF'
+          import sys
+          import py_compile
+          import os
+          
+          sys.path.insert(0, "scripts")
+          for f in os.listdir("scripts"):
+              if f.endswith(".py") and f != "__pycache__":
+                  py_compile.compile(os.path.join("scripts", f), doraise=True)
+          print("All scripts compile successfully")
+          PYEOF
