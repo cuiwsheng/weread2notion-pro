@@ -165,22 +165,42 @@ if __name__ == "__main__":
     year = os.getenv("YEAR") or str(pendulum.now("Asia/Shanghai").year)
 
     read_times = {}
+    
+    # Diagnostic: Check API response structure without exposing full data
     try:
         annual = weread_api.get_read_times_for_year(year)
         print(f"Annual readdata: {len(annual)} days fetched")
+        if len(annual) == 0:
+            # Diagnose why annual returned 0
+            print(f"  WARNING: Annual API returned 0 days for year {year}")
+            print(f"  This may indicate API parameter issue or no data for this year")
         read_times.update({int(k): v for k, v in annual.items()})
     except Exception as e:
-        print(f"Annual readdata fetch skipped: {e}")
+        print(f"Annual readdata fetch failed: {e}")
 
     try:
         monthly_data = weread_api.get_api_data()
         monthly = monthly_data.get("readTimes") or {}
         print(f"Monthly readdata: {len(monthly)} days fetched")
+        if len(monthly) > 0:
+            # Show date range for diagnostics (timestamps only, not values)
+            timestamps = sorted([int(k) for k in monthly.keys()])
+            import pendulum
+            first_date = pendulum.from_timestamp(timestamps[0], tz="Asia/Shanghai").to_date_string()
+            last_date = pendulum.from_timestamp(timestamps[-1], tz="Asia/Shanghai").to_date_string()
+            print(f"  Monthly data range: {first_date} to {last_date}")
         read_times.update({int(k): v for k, v in monthly.items()})
     except Exception as e:
-        print(f"Monthly readdata fetch skipped: {e}")
+        print(f"Monthly readdata fetch failed: {e}")
     
     print(f"Total read_times collected: {len(read_times)} days")
+    
+    if len(read_times) > 0:
+        timestamps = sorted(read_times.keys())
+        import pendulum
+        first = pendulum.from_timestamp(timestamps[0], tz="Asia/Shanghai").to_date_string()
+        last = pendulum.from_timestamp(timestamps[-1], tz="Asia/Shanghai").to_date_string()
+        print(f"Combined data range: {first} to {last}")
 
     sync_read_times_to_notion(helper, read_times)
     export_heatmap_json(helper, year, read_times_seconds=read_times)

@@ -214,21 +214,28 @@ if __name__ == "__main__":
         name = archive.get("name")
         bookIds = archive.get("bookIds")
         archive_dict.update({bookId: name for bookId in bookIds})
+    # Fix: Only skip books that are truly stable (finished + rated)
+    # In-progress books should always update to capture progress changes
     not_need_sync = []
+    skip_reasons = {}
     for key, value in notion_books.items():
+        # Only skip if: finished ("已读") AND has rating AND metadata matches
         if (
-            (archive_dict.get(key) == value.get("category"))
-            and (value.get("cover") is not None)
-            and (
-                value.get("status") != "已读"
-                or (value.get("status") == "已读" and value.get("myRating"))
-            )
+            value.get("status") == "已读"
+            and value.get("myRating")
+            and archive_dict.get(key) == value.get("category")
+            and value.get("cover") is not None
         ):
             not_need_sync.append(key)
+            skip_reasons[key] = "finished+rated+stable"
+    
     notebooks = weread_api.get_notebooklist()
     notebooks = [d["bookId"] for d in notebooks if "bookId" in d]
     books = bookshelf_books.get("books") or []
     books = [d["bookId"] for d in books if d.get("bookId")]
     books = list((set(notebooks) | set(books)) - set(not_need_sync))
+    
+    print(f"Book sync: {len(books)} to update, {len(not_need_sync)} skipped (finished+rated)")
+    
     for index, bookId in enumerate(books):
         insert_book_to_notion(books, index, bookId)
