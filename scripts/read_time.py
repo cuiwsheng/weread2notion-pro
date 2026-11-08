@@ -136,11 +136,16 @@ def update_heatmap_embed(helper):
                 break
 
     if image_file:
+        # Fix: Parse full branch name from REF (e.g., "refs/heads/cursor/fix-xyz" -> "cursor/fix-xyz")
+        ref = os.getenv('REF', 'refs/heads/main')
+        branch = '/'.join(ref.split('/')[2:]) if ref.startswith('refs/heads/') else ref
+        
         image_url = (
             f"https://raw.githubusercontent.com/{os.getenv('REPOSITORY')}/"
-            f"{os.getenv('REF', 'refs/heads/main').split('/')[-1]}/OUT_FOLDER/{image_file}"
+            f"{branch}/OUT_FOLDER/{image_file}"
         )
         heatmap_url = f"https://heatmap.malinkang.com/?image={image_url}"
+        print(f"Heatmap URL: {heatmap_url}")
         if helper.heatmap_block_id:
             helper.update_heatmap(block_id=helper.heatmap_block_id, url=heatmap_url)
         else:
@@ -162,15 +167,20 @@ if __name__ == "__main__":
     read_times = {}
     try:
         annual = weread_api.get_read_times_for_year(year)
+        print(f"Annual readdata: {len(annual)} days fetched")
         read_times.update({int(k): v for k, v in annual.items()})
     except Exception as e:
         print(f"Annual readdata fetch skipped: {e}")
 
     try:
-        monthly = weread_api.get_api_data().get("readTimes") or {}
+        monthly_data = weread_api.get_api_data()
+        monthly = monthly_data.get("readTimes") or {}
+        print(f"Monthly readdata: {len(monthly)} days fetched")
         read_times.update({int(k): v for k, v in monthly.items()})
     except Exception as e:
         print(f"Monthly readdata fetch skipped: {e}")
+    
+    print(f"Total read_times collected: {len(read_times)} days")
 
     sync_read_times_to_notion(helper, read_times)
     export_heatmap_json(helper, year, read_times_seconds=read_times)

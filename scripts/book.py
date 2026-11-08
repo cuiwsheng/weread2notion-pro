@@ -66,7 +66,14 @@ def insert_book_to_notion(books, index, bookId):
     elif book.get("readingTime", 0) >= 60:
         status = "在读"
     book["阅读状态"] = status
-    book["阅读时长"] = book.get("readingTime")
+    # Fix: Only update reading time if API provides valid data (not 0/None)
+    # Preserve existing Notion values when API doesn't provide per-book reading time
+    reading_time = book.get("readingTime")
+    if reading_time and reading_time > 0:
+        book["阅读时长"] = reading_time
+    elif bookId in notion_books and notion_books.get(bookId).get("readingTime"):
+        # Preserve existing non-zero value from Notion
+        book["阅读时长"] = notion_books.get(bookId).get("readingTime")
     book["阅读天数"] = book.get("totalReadDay")
     book["评分"] = book.get("newRating")
     if book.get("newRatingDetail") and book.get("newRatingDetail").get("myRating"):
