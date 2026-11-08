@@ -1,0 +1,53 @@
+name: CI Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**.py'
+      - 'tests/**.py'
+      - 'requirements.txt'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run unit tests
+        run: |
+          python -m unittest discover tests -v
+      
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile scripts/*.py
+      
+      - name: Check imports (without secrets)
+        run: |
+          # Verify scripts can be imported (structure check only, no API calls)
+          python -c "import sys; sys.path.insert(0, 'scripts'); 
+                     # Cannot import with missing env vars, just verify syntax
+                     import py_compile; 
+                     import os;
+                     for f in os.listdir('scripts'):
+                       if f.endswith('.py') and f != '__pycache__':
+                         py_compile.compile(os.path.join('scripts', f), doraise=True);
+                     print('All scripts compile successfully')"
