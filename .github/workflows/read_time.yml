@@ -4,6 +4,15 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 */3 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/read_time.py'
+      - 'scripts/weread_api.py'
+      - 'scripts/notion_helper.py'
+      - 'scripts/utils.py'
+      - '.github/workflows/read_time.yml'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

@@ -51,15 +51,21 @@ f"{os.getenv('REF', 'refs/heads/main').split('/')[-1]}/OUT_FOLDER/{image_file}"
 1. Progress data IS being extracted (PR #6 fix worked for progress)
 2. Duration data is NOT available from the API
 
-### Root Cause
+### Root Cause (HYPOTHESIS - Needs API Evidence)
 
-**WeRead API `/book/getprogress` does NOT provide per-book reading time.**
+**Hypothesis**: WeRead API `/book/getprogress` may not provide per-book reading time consistently.
 
-**Evidence**:
-1. API endpoint name is "getprogress" not "getreadinfo"
+**Observed Evidence**:
+1. Production: 315/494 books have 0 duration despite some having positive progress
+2. Example: "The Beginning of Infinity" has 32% progress but 0 duration
+3. No errors in workflow logs - suggests API returns 0 or omits field
+
+**Speculation** (Not Yet Proven):
+1. API endpoint name is "getprogress" not "getreadinfo" - suggests focus on progress
 2. Code assumes `recordReadingTime` field exists (line 92 weread_api.py)
-3. Production shows most books have 0 duration despite positive progress
-4. No errors in logs - API returns 0 or omits field entirely
+3. May vary by book type, reading history, or API version
+
+**Required to Prove**: Live API response inspection with actual credentials
 
 **Historical Context**:
 - PR #4 migrated from `/book/readinfo` to `/book/getprogress`
