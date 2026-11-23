@@ -38,9 +38,16 @@ class WeReadApi:
         if errcode != 0:
             errmsg = data.get("errmsg") or data.get("errlog") or str(data)
             raise Exception(f"WeRead API {api_name} failed ({errcode}): {errmsg}")
+        
+        # Handle upgrade advisory (not an error)
         if "upgrade_info" in data:
-            msg = data["upgrade_info"].get("message", "请升级 weread-skills 版本")
-            raise Exception(f"技能版本需升级: {msg}")
+            msg = data["upgrade_info"].get("message", "")
+            upgrade_url = data["upgrade_info"].get("upgrade_url", "")
+            print(f"⚠️  Skill 升级通知: {msg[:100]}...")
+            if upgrade_url:
+                print(f"   升级链接: {upgrade_url}")
+            # Continue with valid response data - advisory does not block execution
+        
         return data
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
