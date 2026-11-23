@@ -7,7 +7,7 @@ import requests
 from retrying import retry
 
 WEREAD_GATEWAY_URL = "https://i.weread.qq.com/api/agent/gateway"
-SKILL_VERSION = "1.0.5"
+SKILL_VERSION = "1.0.6"  # Tencent/WeChatReading official latest (2026-11-17)
 
 
 class WeReadApi:
